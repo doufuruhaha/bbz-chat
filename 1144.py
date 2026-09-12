@@ -6,10 +6,20 @@ import uuid
 import threading
 from typing import Dict, List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
 app = FastAPI()
+
+# ============ 允许跨域（CORS） ============
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ============ 管理员密钥（改成你自己的） ============
 ADMIN_KEY = "bbz_admin_2026_change_me"
