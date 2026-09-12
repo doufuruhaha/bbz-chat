@@ -9,10 +9,11 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 app = FastAPI()
 
-# ============ 允许跨域（CORS） ============
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,57 +22,117 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ============ 管理员密钥（改成你自己的） ============
 ADMIN_KEY = "bbz_admin_2026_change_me"
 
-# ============ 数据存储（JSON 文件） ============
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-os.makedirs(DATA_DIR, exist_ok=True)
+# ============ 数据库连接 ============
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
-USERS_FILE = os.path.join(DATA_DIR, "users.json")
-ROOMS_FILE = os.path.join(DATA_DIR, "rooms.json")
-CHAT_FILE = os.path.join(DATA_DIR, "chat_history.json")
-
-_data_lock = threading.Lock()
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 
-def load_json(path, default):
-    if not os.path.exists(path):
-        return default
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password TEXT NOT NULL,
+            money INT DEFAULT 0,
+            armor INT DEFAULT 0,
+            dmg INT DEFAULT 0,
+            ammo INT DEFAULT 0,
+            cans INT DEFAULT 0,
+            tasks JSONB DEFAULT '{"kill":0,"collect":0,"extract":0}'
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS rooms (
+            id TEXT PRIMARY KEY,
+            data JSONB NOT NULL
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id SERIAL PRIMARY KEY,
+            msg_id TEXT,
+            username TEXT,
+            text TEXT,
+            time DOUBLE PRECISION,
+            type TEXT DEFAULT 'chat'
+        );
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+@app.on_event("startup")
+def startup():
+    init_db()
+
+
+def db_get_user(username):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE username=%s", (username,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row
+
+
+def db_create_user(username, password_hash, money=0, armor=0, dmg=0, ammo=0, cans=0):
+    conn = get_conn()
+    cur = conn.cursor()
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
+        cur.execute(
+            "INSERT INTO users (username, password, money, armor, dmg, ammo, cans) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (username, password_hash, money, armor, dmg, ammo, cans)
+        )
+        conn.commit()
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return False
+    cur.close()
+    conn.close()
+    return True
 
 
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def db_update_user(username, **fields):
+    conn = get_conn()
+    cur = conn.cursor()
+    sets = []
+    values = []
+    for k, v in fields.items():
+        sets.append(f"{k}=%s")
+        values.append(v)
+    values.append(username)
+    cur.execute(f"UPDATE users SET {', '.join(sets)} WHERE username=%s", values)
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
-def get_users():
-    return load_json(USERS_FILE, {"users": {}})
+def db_delete_user(username):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM users WHERE username=%s", (username,))
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
-def set_users(data):
-    save_json(USERS_FILE, data)
-
-
-def get_rooms():
-    return load_json(ROOMS_FILE, {"rooms": {}})
-
-
-def set_rooms(data):
-    save_json(ROOMS_FILE, data)
-
-
-def get_chat_history():
-    return load_json(CHAT_FILE, {"messages": []})
-
-
-def set_chat_history(data):
-    save_json(CHAT_FILE, data)
+def db_all_users():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
 
 
 # ============ 数据模型 ============
@@ -164,195 +225,207 @@ class AdminChatSend(BaseModel):
     text: str
 
 
-# ============ HTTP API（游戏客户端用） ============
+# ============ 游戏 API ============
 @app.post("/api/register")
 def api_register(req: RegisterReq):
-    with _data_lock:
-        data = get_users()
-        users = data.get("users", {})
-        if req.user in users:
-            return {"success": False, "message": "用户名已被注册"}
-        hashed = hashlib.sha256(req.password.encode()).hexdigest()
-        users[req.user] = {
-            "password": hashed, "money": 0, "armor": 0, "dmg": 0, "ammo": 0, "cans": 0,
-            "tasks": {"kill": 0, "collect": 0, "extract": 0}
-        }
-        data["users"] = users
-        set_users(data)
-    return {"success": True, "message": "注册成功"}
+    if db_get_user(req.user):
+        return {"success": False, "message": "用户名已被注册"}
+    hashed = hashlib.sha256(req.password.encode()).hexdigest()
+    ok = db_create_user(req.user, hashed)
+    if ok:
+        return {"success": True, "message": "注册成功"}
+    return {"success": False, "message": "注册失败"}
 
 
 @app.post("/api/login")
 def api_login(req: LoginReq):
-    data = get_users()
-    users = data.get("users", {})
-    if req.user not in users:
+    u = db_get_user(req.user)
+    if not u:
         return {"success": False, "message": "用户名不存在"}
     hashed = hashlib.sha256(req.password.encode()).hexdigest()
-    if users[req.user].get("password") != hashed:
+    if u["password"] != hashed:
         return {"success": False, "message": "密码错误"}
-    u = users[req.user]
     return {
         "success": True, "message": "登录成功",
-        "money": u.get("money", 0), "armor": u.get("armor", 0),
-        "dmg": u.get("dmg", 0), "ammo": u.get("ammo", 0),
-        "tasks": u.get("tasks", {"kill": 0, "collect": 0, "extract": 0})
+        "money": u["money"], "armor": u["armor"],
+        "dmg": u["dmg"], "ammo": u["ammo"],
+        "tasks": u["tasks"] or {"kill": 0, "collect": 0, "extract": 0}
     }
 
 
 @app.post("/api/save")
 def api_save(req: SaveReq):
-    with _data_lock:
-        data = get_users()
-        users = data.get("users", {})
-        if req.user not in users:
-            return {"success": False, "message": "用户不存在"}
-        users[req.user].update({
-            "money": req.money, "armor": req.armor,
-            "dmg": req.dmg, "ammo": req.ammo, "tasks": req.tasks
-        })
-        data["users"] = users
-        set_users(data)
+    u = db_get_user(req.user)
+    if not u:
+        return {"success": False, "message": "用户不存在"}
+    db_update_user(req.user,
+                   money=req.money, armor=req.armor,
+                   dmg=req.dmg, ammo=req.ammo, tasks=json.dumps(req.tasks))
     return {"success": True}
 
 
 @app.get("/api/rooms")
 def api_rooms():
-    data = get_rooms()
-    rooms = data.get("rooms", {})
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM rooms")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
     now = time.time()
     available = {}
-    for rid, room in rooms.items():
+    for row in rows:
+        room = row["data"]
         players = [p for p in room.get("players", []) if now - p.get("last_update", 0) < 15]
         room["players"] = players
         if room.get("status") == "waiting" and len(players) < room.get("max_players", 10):
-            available[rid] = room
+            available[row["id"]] = room
     return {"success": True, "rooms": available}
 
 
 @app.post("/api/room/create")
 def api_room_create(req: RoomCreateReq):
-    with _data_lock:
-        data = get_rooms()
-        rooms = data.get("rooms", {})
-        for rid, room in rooms.items():
-            if room.get("name") == req.name:
-                return {"success": False, "message": "房间名已存在"}
-        room_id = f"room_{int(time.time())}_{uuid.uuid4().hex[:4]}"
-        rooms[room_id] = {
-            "id": room_id, "name": req.name, "password": req.password,
-            "host": req.host, "players": [{
-                "name": req.host, "x": 200, "y": 200, "angle": 0,
-                "hp": req.host_hp, "maxhp": req.host_hp, "dmg": req.host_dmg,
-                "res": req.host_res, "last_update": time.time()
-            }],
-            "status": "waiting", "max_players": req.max_players,
-            "created_at": time.time(), "map_idx": req.map_idx,
-            "is_night": req.is_night
-        }
-        data["rooms"] = rooms
-        set_rooms(data)
-    return {"success": True, "message": "创建成功", "room_id": room_id, "room": rooms[room_id]}
+    room_id = f"room_{int(time.time())}_{uuid.uuid4().hex[:4]}"
+    room = {
+        "id": room_id, "name": req.name, "password": req.password,
+        "host": req.host, "players": [{
+            "name": req.host, "x": 200, "y": 200, "angle": 0,
+            "hp": req.host_hp, "maxhp": req.host_hp, "dmg": req.host_dmg,
+            "res": req.host_res, "last_update": time.time()
+        }],
+        "status": "waiting", "max_players": req.max_players,
+        "created_at": time.time(), "map_idx": req.map_idx,
+        "is_night": req.is_night
+    }
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO rooms (id, data) VALUES (%s, %s)", (room_id, json.dumps(room)))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"success": True, "message": "创建成功", "room_id": room_id, "room": room}
 
 
 @app.post("/api/room/join")
 def api_room_join(req: RoomJoinReq):
-    with _data_lock:
-        data = get_rooms()
-        rooms = data.get("rooms", {})
-        if req.room_id not in rooms:
-            return {"success": False, "message": "房间不存在"}
-        room = rooms[req.room_id]
-        if room.get("password") and room["password"] != req.password:
-            return {"success": False, "message": "密码错误"}
-        if len(room.get("players", [])) >= room.get("max_players", 10):
-            return {"success": False, "message": "房间已满"}
-        for p in room.get("players", []):
-            if p.get("name") == req.user:
-                return {"success": True, "message": "已在房间", "room": room}
-        room["players"].append({
-            "name": req.user, "x": 300, "y": 300, "angle": 0,
-            "hp": req.hp, "maxhp": req.hp, "dmg": req.dmg,
-            "res": req.res, "last_update": time.time()
-        })
-        data["rooms"] = rooms
-        set_rooms(data)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT data FROM rooms WHERE id=%s", (req.room_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        return {"success": False, "message": "房间不存在"}
+    room = row["data"]
+    if room.get("password") and room["password"] != req.password:
+        cur.close()
+        conn.close()
+        return {"success": False, "message": "密码错误"}
+    for p in room.get("players", []):
+        if p.get("name") == req.user:
+            cur.close()
+            conn.close()
+            return {"success": True, "message": "已在房间", "room": room}
+    if len(room.get("players", [])) >= room.get("max_players", 10):
+        cur.close()
+        conn.close()
+        return {"success": False, "message": "房间已满"}
+    room["players"].append({
+        "name": req.user, "x": 300, "y": 300, "angle": 0,
+        "hp": req.hp, "maxhp": req.hp, "dmg": req.dmg,
+        "res": req.res, "last_update": time.time()
+    })
+    cur.execute("UPDATE rooms SET data=%s WHERE id=%s", (json.dumps(room), req.room_id))
+    conn.commit()
+    cur.close()
+    conn.close()
     return {"success": True, "message": "加入成功", "room": room}
 
 
 @app.post("/api/room/leave")
 def api_room_leave(req: RoomLeaveReq):
-    with _data_lock:
-        data = get_rooms()
-        rooms = data.get("rooms", {})
-        if req.room_id not in rooms:
-            return {"success": False}
-        room = rooms[req.room_id]
-        room["players"] = [p for p in room.get("players", []) if p.get("name") != req.user]
-        if room.get("host") == req.user:
-            if room.get("players"):
-                room["host"] = room["players"][0].get("name")
-            else:
-                del rooms[req.room_id]
-                data["rooms"] = rooms
-                set_rooms(data)
-                return {"success": True}
-        data["rooms"] = rooms
-        set_rooms(data)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT data FROM rooms WHERE id=%s", (req.room_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        return {"success": False}
+    room = row["data"]
+    room["players"] = [p for p in room.get("players", []) if p.get("name") != req.user]
+    if room.get("host") == req.user:
+        if room.get("players"):
+            room["host"] = room["players"][0].get("name")
+        else:
+            cur.execute("DELETE FROM rooms WHERE id=%s", (req.room_id,))
+            conn.commit()
+            cur.close()
+            conn.close()
+            return {"success": True}
+    cur.execute("UPDATE rooms SET data=%s WHERE id=%s", (json.dumps(room), req.room_id))
+    conn.commit()
+    cur.close()
+    conn.close()
     return {"success": True}
 
 
 @app.post("/api/room/update")
 def api_room_update(req: RoomUpdateReq):
-    with _data_lock:
-        data = get_rooms()
-        rooms = data.get("rooms", {})
-        if req.room_id not in rooms:
-            return {"success": False}
-        room = rooms[req.room_id]
-        for p in room.get("players", []):
-            if p.get("name") == req.user:
-                p["x"] = req.x
-                p["y"] = req.y
-                p["angle"] = req.angle
-                p["hp"] = req.hp
-                p["last_update"] = time.time()
-                break
-        now = time.time()
-        room["players"] = [p for p in room.get("players", []) if now - p.get("last_update", 0) < 15]
-        data["rooms"] = rooms
-        set_rooms(data)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT data FROM rooms WHERE id=%s", (req.room_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        return {"success": False}
+    room = row["data"]
+    for p in room.get("players", []):
+        if p.get("name") == req.user:
+            p["x"] = req.x
+            p["y"] = req.y
+            p["angle"] = req.angle
+            p["hp"] = req.hp
+            p["last_update"] = time.time()
+            break
+    now = time.time()
+    room["players"] = [p for p in room.get("players", []) if now - p.get("last_update", 0) < 15]
+    cur.execute("UPDATE rooms SET data=%s WHERE id=%s", (json.dumps(room), req.room_id))
+    conn.commit()
+    cur.close()
+    conn.close()
     return {"success": True}
 
 
 @app.get("/api/room/{room_id}")
 def api_room_info(room_id: str):
-    data = get_rooms()
-    rooms = data.get("rooms", {})
-    if room_id not in rooms:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT data FROM rooms WHERE id=%s", (room_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
         return {"success": False, "message": "房间不存在"}
-    room = rooms[room_id]
+    room = row["data"]
     now = time.time()
     room["players"] = [p for p in room.get("players", []) if now - p.get("last_update", 0) < 15]
     return {"success": True, "room": room}
 
 
-# ============ 管理后台 API ============
+# ============ 管理后台 ============
 @app.post("/admin/users/list")
 def admin_users_list(req: AdminAuth):
     if req.admin_key != ADMIN_KEY:
         return {"success": False, "message": "密钥错误"}
-    data = get_users()
-    users = data.get("users", {})
+    rows = db_all_users()
     result = {}
-    for name, u in users.items():
-        result[name] = {
-            "money": u.get("money", 0),
-            "armor": u.get("armor", 0),
-            "dmg": u.get("dmg", 0),
-            "ammo": u.get("ammo", 0),
-            "cans": u.get("cans", 0),
-            "tasks": u.get("tasks", {"kill": 0, "collect": 0, "extract": 0})
+    for u in rows:
+        result[u["username"]] = {
+            "money": u["money"], "armor": u["armor"],
+            "dmg": u["dmg"], "ammo": u["ammo"], "cans": u["cans"],
+            "tasks": u["tasks"] or {"kill": 0, "collect": 0, "extract": 0}
         }
     return {"success": True, "users": result}
 
@@ -361,37 +434,23 @@ def admin_users_list(req: AdminAuth):
 def admin_user_add(req: AdminUserAdd):
     if req.admin_key != ADMIN_KEY:
         return {"success": False, "message": "密钥错误"}
-    with _data_lock:
-        data = get_users()
-        users = data.get("users", {})
-        if req.user in users:
-            return {"success": False, "message": "已存在"}
-        hashed = hashlib.sha256(req.password.encode()).hexdigest()
-        users[req.user] = {
-            "password": hashed,
-            "money": req.money, "armor": req.armor, "dmg": req.dmg, "ammo": req.ammo, "cans": req.cans,
-            "tasks": {"kill": 0, "collect": 0, "extract": 0}
-        }
-        data["users"] = users
-        set_users(data)
-    return {"success": True, "message": "添加成功"}
+    if db_get_user(req.user):
+        return {"success": False, "message": "已存在"}
+    hashed = hashlib.sha256(req.password.encode()).hexdigest()
+    ok = db_create_user(req.user, hashed, req.money, req.armor, req.dmg, req.ammo, req.cans)
+    if ok:
+        return {"success": True, "message": "添加成功"}
+    return {"success": False, "message": "添加失败"}
 
 
 @app.post("/admin/user/edit")
 def admin_user_edit(req: AdminUserEdit):
     if req.admin_key != ADMIN_KEY:
         return {"success": False, "message": "密钥错误"}
-    with _data_lock:
-        data = get_users()
-        users = data.get("users", {})
-        if req.user not in users:
-            return {"success": False, "message": "用户不存在"}
-        users[req.user].update({
-            "money": req.money, "armor": req.armor,
-            "dmg": req.dmg, "ammo": req.ammo, "cans": req.cans
-        })
-        data["users"] = users
-        set_users(data)
+    if not db_get_user(req.user):
+        return {"success": False, "message": "用户不存在"}
+    db_update_user(req.user, money=req.money, armor=req.armor,
+                   dmg=req.dmg, ammo=req.ammo, cans=req.cans)
     return {"success": True, "message": "修改成功"}
 
 
@@ -399,13 +458,7 @@ def admin_user_edit(req: AdminUserEdit):
 def admin_user_delete(req: AdminUserDelete):
     if req.admin_key != ADMIN_KEY:
         return {"success": False, "message": "密钥错误"}
-    with _data_lock:
-        data = get_users()
-        users = data.get("users", {})
-        if req.user in users:
-            del users[req.user]
-        data["users"] = users
-        set_users(data)
+    db_delete_user(req.user)
     return {"success": True, "message": "删除成功"}
 
 
@@ -413,19 +466,31 @@ def admin_user_delete(req: AdminUserDelete):
 def admin_chat_list(req: AdminAuth):
     if req.admin_key != ADMIN_KEY:
         return {"success": False, "message": "密钥错误"}
-    hist = get_chat_history().get("messages", [])
-    return {"success": True, "messages": hist}
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM chat_messages ORDER BY time ASC LIMIT 200")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    msgs = [{"user": r["username"], "text": r["text"],
+             "time": r["time"], "msg_id": r["msg_id"], "type": r["type"]} for r in rows]
+    return {"success": True, "messages": msgs}
 
 
 @app.post("/admin/chat/clear")
 def admin_chat_clear(req: AdminAuth):
     if req.admin_key != ADMIN_KEY:
         return {"success": False, "message": "密钥错误"}
-    with _data_lock:
-        set_chat_history({"messages": [{
-            "user": "系统", "text": "💬 聊天记录已被管理员清空",
-            "time": time.time(), "msg_id": f"clear_{int(time.time())}"
-        }]})
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM chat_messages")
+    cur.execute(
+        "INSERT INTO chat_messages (msg_id, username, text, time, type) VALUES (%s,%s,%s,%s,%s)",
+        (f"clear_{int(time.time())}", "系统", "💬 聊天记录已被管理员清空", time.time(), "system")
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
     return {"success": True, "message": "已清空"}
 
 
@@ -436,20 +501,24 @@ async def admin_chat_send(req: AdminChatSend):
     msg = {
         "user": "后台管理员", "text": req.text,
         "time": time.time(),
-        "msg_id": f"admin_{int(time.time()*1000)}"
+        "msg_id": f"admin_{int(time.time()*1000)}",
+        "type": "chat"
     }
-    with _data_lock:
-        h = get_chat_history()
-        h["messages"].append(msg)
-        if len(h["messages"]) > 200:
-            h["messages"] = h["messages"][-200:]
-        set_chat_history(h)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO chat_messages (msg_id, username, text, time, type) VALUES (%s,%s,%s,%s,%s)",
+        (msg["msg_id"], msg["user"], msg["text"], msg["time"], msg["type"])
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
     for rid in list(rooms_ws.keys()):
         await broadcast_ws(rid, msg)
     return {"success": True, "message": "发送成功"}
 
 
-# ============ WebSocket 聊天 ============
+# ============ WebSocket ============
 rooms_ws: Dict[str, List[WebSocket]] = {}
 conn_user: Dict[WebSocket, str] = {}
 
@@ -473,10 +542,18 @@ async def chat_endpoint(websocket: WebSocket, room_id: str, user_name: str):
     rooms_ws.setdefault(room_id, []).append(websocket)
     conn_user[websocket] = user_name
 
-    hist = get_chat_history().get("messages", [])[-50:]
-    for m in hist:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM chat_messages ORDER BY time DESC LIMIT 50")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    for r in reversed(rows):
         try:
-            await websocket.send_json(m)
+            await websocket.send_json({
+                "user": r["username"], "text": r["text"],
+                "time": r["time"], "msg_id": r["msg_id"], "type": r["type"]
+            })
         except Exception:
             break
 
@@ -502,12 +579,15 @@ async def chat_endpoint(websocket: WebSocket, room_id: str, user_name: str):
                 "time": time.time(),
                 "msg_id": f"{user_name}_{int(time.time()*1000)}"
             }
-            with _data_lock:
-                h = get_chat_history()
-                h["messages"].append(msg)
-                if len(h["messages"]) > 200:
-                    h["messages"] = h["messages"][-200:]
-                set_chat_history(h)
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO chat_messages (msg_id, username, text, time, type) VALUES (%s,%s,%s,%s,%s)",
+                (msg["msg_id"], msg["user"], msg["text"], msg["time"], msg["type"])
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
             await broadcast_ws(room_id, msg)
     except WebSocketDisconnect:
         pass
