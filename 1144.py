@@ -62,6 +62,19 @@ def init_db():
             type TEXT DEFAULT 'chat'
         );
     """)
+    # ============ 新增：任务系统表 ============
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS task_defs (
+            id TEXT PRIMARY KEY,
+            data JSONB NOT NULL
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS daily_tasks (
+            id INT PRIMARY KEY DEFAULT 1,
+            data JSONB NOT NULL
+        );
+    """)
     conn.commit()
     cur.close()
     conn.close()
@@ -70,6 +83,7 @@ def init_db():
 @app.on_event("startup")
 def startup():
     init_db()
+    seed_default_tasks()
 
 
 def db_get_user(username):
@@ -133,6 +147,93 @@ def db_all_users():
     cur.close()
     conn.close()
     return rows
+
+
+# ============ 任务系统数据库操作 ============
+def db_task_defs_all():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, data FROM task_defs")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return {r["id"]: r["data"] for r in rows}
+
+
+def db_task_def_upsert(tid, data):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO task_defs (id, data) VALUES (%s, %s) "
+        "ON CONFLICT (id) DO UPDATE SET data=EXCLUDED.data",
+        (tid, json.dumps(data, ensure_ascii=False))
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def db_task_def_delete(tid):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM task_defs WHERE id=%s", (tid,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def db_daily_get():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT data FROM daily_tasks WHERE id=1")
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return {"date": "", "tasks": []}
+    return row["data"]
+
+
+def db_daily_set(data):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO daily_tasks (id, data) VALUES (1, %s) "
+        "ON CONFLICT (id) DO UPDATE SET data=EXCLUDED.data",
+        (json.dumps(data, ensure_ascii=False),)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============ 默认任务池 ============
+DEFAULT_TASK_DEFS = {
+    "sniper_kill_3":    {"name": "神枪手",     "desc": "用狙击枪击杀 3 名敌人",     "metric": "sniper_kills",          "target": 3, "reward": 400},
+    "kill_8":           {"name": "清道夫",     "desc": "击杀 8 名敌人",             "metric": "kills",                 "target": 8, "reward": 350},
+    "boss_kill":        {"name": "屠龙者",     "desc": "击杀 1 名重装Boss",         "metric": "boss_kills",            "target": 1, "reward": 600},
+    "shotgun_kill_2":   {"name": "近战之王",   "desc": "用霰弹枪击杀 2 名敌人",     "metric": "shotgun_kills",         "target": 2, "reward": 300},
+    "gold_5":           {"name": "淘金热",     "desc": "收集 5 个金罐头",           "metric": "gold_cans",             "target": 5, "reward": 500},
+    "can_10":           {"name": "罐头收藏家", "desc": "收集 10 个普通罐头",        "metric": "cans",                  "target": 10, "reward": 300},
+    "medkit_3":         {"name": "医疗储备",   "desc": "拾取 3 个医疗包",           "metric": "medkits",               "target": 3, "reward": 250},
+    "no_damage_extract":{"name": "完美行动",   "desc": "不受伤成功撤离 1 次",       "metric": "no_damage_extracts",    "target": 1, "reward": 700},
+    "night_extract":    {"name": "夜行者",     "desc": "在黑夜地图成功撤离 1 次",   "metric": "night_extracts",        "target": 1, "reward": 500},
+    "extract_2":        {"name": "常胜将军",   "desc": "成功撤离 2 次",             "metric": "extracts",              "target": 2, "reward": 400},
+    "full_backpack":    {"name": "满载而归",   "desc": "背包满时成功撤离 1 次",     "metric": "full_backpack_extracts","target": 1, "reward": 450},
+}
+
+
+def seed_default_tasks():
+    """首次启动时把默认任务池写入 DB"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) AS c FROM task_defs")
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row and row["c"] == 0:
+        for tid, d in DEFAULT_TASK_DEFS.items():
+            db_task_def_upsert(tid, d)
 
 
 # ============ 数据模型 ============
@@ -225,6 +326,32 @@ class AdminChatSend(BaseModel):
     text: str
 
 
+# ============ 新增：任务系统请求模型 ============
+class AdminTaskItem(BaseModel):
+    id: str
+    reward: int = 0
+
+
+class AdminTaskSave(BaseModel):
+    admin_key: str
+    tasks: List[AdminTaskItem] = []
+
+
+class AdminTaskUpsert(BaseModel):
+    admin_key: str
+    id: str
+    name: str
+    desc: str
+    metric: str
+    target: int
+    reward: int
+
+
+class AdminTaskDelete(BaseModel):
+    admin_key: str
+    id: str
+
+
 # ============ 游戏 API ============
 @app.post("/api/register")
 def api_register(req: RegisterReq):
@@ -281,6 +408,27 @@ def api_rooms():
         if room.get("status") == "waiting" and len(players) < room.get("max_players", 10):
             available[row["id"]] = room
     return {"success": True, "rooms": available}
+
+
+# ============ 新增：前台每日任务拉取 ============
+@app.get("/api/daily_tasks")
+def api_daily_tasks():
+    cfg = db_daily_get()
+    today = time.strftime("%Y-%m-%d")
+    # 日期跨了自动视为空，让后台重新布置
+    if cfg.get("date") != today:
+        cfg = {"date": today, "tasks": []}
+    defs = db_task_defs_all()
+    out = []
+    for t in cfg.get("tasks", []):
+        tid = t.get("id")
+        if tid in defs:
+            d = dict(defs[tid])
+            d["id"] = tid
+            if "reward" in t:
+                d["reward"] = t["reward"]
+            out.append(d)
+    return {"success": True, "date": cfg.get("date"), "tasks": out}
 
 
 @app.post("/api/room/create")
@@ -516,6 +664,73 @@ async def admin_chat_send(req: AdminChatSend):
     for rid in list(rooms_ws.keys()):
         await broadcast_ws(rid, msg)
     return {"success": True, "message": "发送成功"}
+
+
+# ============ 新增：管理后台 - 每日任务 ============
+@app.post("/admin/tasks/list")
+def admin_tasks_list(req: AdminAuth):
+    if req.admin_key != ADMIN_KEY:
+        return {"success": False, "message": "密钥错误"}
+    return {
+        "success": True,
+        "defs": db_task_defs_all(),
+        "daily": db_daily_get()
+    }
+
+
+@app.post("/admin/tasks/save")
+def admin_tasks_save(req: AdminTaskSave):
+    if req.admin_key != ADMIN_KEY:
+        return {"success": False, "message": "密钥错误"}
+    defs = db_task_defs_all()
+    tasks = []
+    for t in req.tasks:
+        if t.id in defs:
+            # 奖励回写到 defs
+            d = dict(defs[t.id])
+            d["reward"] = int(t.reward)
+            db_task_def_upsert(t.id, d)
+            tasks.append({"id": t.id, "reward": int(t.reward)})
+    today = time.strftime("%Y-%m-%d")
+    db_daily_set({"date": today, "tasks": tasks})
+    return {"success": True, "message": "已保存"}
+
+
+@app.post("/admin/tasks/clear")
+def admin_tasks_clear(req: AdminAuth):
+    if req.admin_key != ADMIN_KEY:
+        return {"success": False, "message": "密钥错误"}
+    today = time.strftime("%Y-%m-%d")
+    db_daily_set({"date": today, "tasks": []})
+    return {"success": True, "message": "已清空"}
+
+
+@app.post("/admin/task/upsert")
+def admin_task_upsert(req: AdminTaskUpsert):
+    """新增/修改一个任务定义"""
+    if req.admin_key != ADMIN_KEY:
+        return {"success": False, "message": "密钥错误"}
+    data = {
+        "name": req.name,
+        "desc": req.desc,
+        "metric": req.metric,
+        "target": int(req.target),
+        "reward": int(req.reward),
+    }
+    db_task_def_upsert(req.id, data)
+    return {"success": True, "message": "已保存"}
+
+
+@app.post("/admin/task/delete")
+def admin_task_delete(req: AdminTaskDelete):
+    if req.admin_key != ADMIN_KEY:
+        return {"success": False, "message": "密钥错误"}
+    db_task_def_delete(req.id)
+    # 从今日布置里也移除
+    cfg = db_daily_get()
+    cfg["tasks"] = [t for t in cfg.get("tasks", []) if t.get("id") != req.id]
+    db_daily_set(cfg)
+    return {"success": True, "message": "已删除"}
 
 
 # ============ WebSocket ============
