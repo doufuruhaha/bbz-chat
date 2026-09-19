@@ -62,7 +62,6 @@ def init_db():
             type TEXT DEFAULT 'chat'
         );
     """)
-    # ============ 新增：任务系统表 ============
     cur.execute("""
         CREATE TABLE IF NOT EXISTS task_defs (
             id TEXT PRIMARY KEY,
@@ -224,7 +223,6 @@ DEFAULT_TASK_DEFS = {
 
 
 def seed_default_tasks():
-    """首次启动时把默认任务池写入 DB"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) AS c FROM task_defs")
@@ -326,7 +324,6 @@ class AdminChatSend(BaseModel):
     text: str
 
 
-# ============ 新增：任务系统请求模型 ============
 class AdminTaskItem(BaseModel):
     id: str
     reward: int = 0
@@ -410,12 +407,11 @@ def api_rooms():
     return {"success": True, "rooms": available}
 
 
-# ============ 新增：前台每日任务拉取 ============
-@app.get("/api/daily_tasks")
+# ============ 前台每日任务拉取（GET + HEAD）============
+@app.api_route("/api/daily_tasks", methods=["GET", "HEAD"])
 def api_daily_tasks():
     cfg = db_daily_get()
     today = time.strftime("%Y-%m-%d")
-    # 日期跨了自动视为空，让后台重新布置
     if cfg.get("date") != today:
         cfg = {"date": today, "tasks": []}
     defs = db_task_defs_all()
@@ -666,7 +662,6 @@ async def admin_chat_send(req: AdminChatSend):
     return {"success": True, "message": "发送成功"}
 
 
-# ============ 新增：管理后台 - 每日任务 ============
 @app.post("/admin/tasks/list")
 def admin_tasks_list(req: AdminAuth):
     if req.admin_key != ADMIN_KEY:
@@ -686,7 +681,6 @@ def admin_tasks_save(req: AdminTaskSave):
     tasks = []
     for t in req.tasks:
         if t.id in defs:
-            # 奖励回写到 defs
             d = dict(defs[t.id])
             d["reward"] = int(t.reward)
             db_task_def_upsert(t.id, d)
@@ -707,7 +701,6 @@ def admin_tasks_clear(req: AdminAuth):
 
 @app.post("/admin/task/upsert")
 def admin_task_upsert(req: AdminTaskUpsert):
-    """新增/修改一个任务定义"""
     if req.admin_key != ADMIN_KEY:
         return {"success": False, "message": "密钥错误"}
     data = {
@@ -726,7 +719,6 @@ def admin_task_delete(req: AdminTaskDelete):
     if req.admin_key != ADMIN_KEY:
         return {"success": False, "message": "密钥错误"}
     db_task_def_delete(req.id)
-    # 从今日布置里也移除
     cfg = db_daily_get()
     cfg["tasks"] = [t for t in cfg.get("tasks", []) if t.get("id") != req.id]
     db_daily_set(cfg)
@@ -814,7 +806,8 @@ async def chat_endpoint(websocket: WebSocket, room_id: str, user_name: str):
             rooms_ws.pop(room_id, None)
 
 
-@app.get("/")
+# ============ 根路由：GET + HEAD ============
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {"status": "ok"}
 
