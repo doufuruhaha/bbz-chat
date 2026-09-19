@@ -74,6 +74,12 @@ def init_db():
             data JSONB NOT NULL
         );
     """)
+    # 兼容旧表：VIP 字段
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_level INT DEFAULT 0")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_expire BIGINT DEFAULT 0")
+    except Exception:
+        pass
     conn.commit()
     cur.close()
     conn.close()
@@ -206,6 +212,37 @@ def db_daily_set(data):
     conn.close()
 
 
+# ============ VIP 数据库操作 ============
+def db_get_vip(username):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT vip_level, vip_expire FROM users WHERE username=%s", (username,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return {"vip_level": 0, "vip_expire": 0}
+    return {"vip_level": row["vip_level"] or 0, "vip_expire": row["vip_expire"] or 0}
+
+
+def db_set_vip(username, level, expire_ts):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET vip_level=%s, vip_expire=%s WHERE username=%s",
+                (level, expire_ts, username))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def is_vip_active(v):
+    if not v or v.get("vip_level", 0) <= 0:
+        return False
+    if v["vip_level"] == 4:
+        return True
+    return v.get("vip_expire", 0) > time.time()
+
+
 # ============ 默认任务池 ============
 DEFAULT_TASK_DEFS = {
     "sniper_kill_3":    {"name": "神枪手",     "desc": "用狙击枪击杀 3 名敌人",     "metric": "sniper_kills",          "target": 3, "reward": 400},
@@ -219,6 +256,14 @@ DEFAULT_TASK_DEFS = {
     "night_extract":    {"name": "夜行者",     "desc": "在黑夜地图成功撤离 1 次",   "metric": "night_extracts",        "target": 1, "reward": 500},
     "extract_2":        {"name": "常胜将军",   "desc": "成功撤离 2 次",             "metric": "extracts",              "target": 2, "reward": 400},
     "full_backpack":    {"name": "满载而归",   "desc": "背包满时成功撤离 1 次",     "metric": "full_backpack_extracts","target": 1, "reward": 450},
+}
+
+# ============ VIP 套餐 ============
+VIP_PLANS = {
+    "month":    {"name": "月卡", "days": 30,  "price": 6},
+    "quarter":  {"name": "季卡", "days": 90,  "price": 15},
+    "year":     {"name": "年卡", "days": 365, "price": 50},
+    "forever":  {"name": "永久", "days": 0,   "price": 128},
 }
 
 
@@ -349,6 +394,17 @@ class AdminTaskDelete(BaseModel):
     id: str
 
 
+class VIPGrant(BaseModel):
+    admin_key: str
+    user: str
+    plan: str = "month"
+
+
+class VIPRevoke(BaseModel):
+    admin_key: str
+    user: str
+
+
 # ============ 游戏 API ============
 @app.post("/api/register")
 def api_register(req: RegisterReq):
@@ -369,11 +425,15 @@ def api_login(req: LoginReq):
     hashed = hashlib.sha256(req.password.encode()).hexdigest()
     if u["password"] != hashed:
         return {"success": False, "message": "密码错误"}
+    v = db_get_vip(req.user)
     return {
         "success": True, "message": "登录成功",
         "money": u["money"], "armor": u["armor"],
         "dmg": u["dmg"], "ammo": u["ammo"],
-        "tasks": u["tasks"] or {"kill": 0, "collect": 0, "extract": 0}
+        "tasks": u["tasks"] or {"kill": 0, "collect": 0, "extract": 0},
+        "is_vip": is_vip_active(v),
+        "vip_level": v["vip_level"],
+        "vip_expire": v["vip_expire"],
     }
 
 
@@ -407,7 +467,6 @@ def api_rooms():
     return {"success": True, "rooms": available}
 
 
-# ============ 前台每日任务拉取（GET + HEAD）============
 @app.api_route("/api/daily_tasks", methods=["GET", "HEAD"])
 def api_daily_tasks():
     cfg = db_daily_get()
@@ -425,6 +484,24 @@ def api_daily_tasks():
                 d["reward"] = t["reward"]
             out.append(d)
     return {"success": True, "date": cfg.get("date"), "tasks": out}
+
+
+# ============ VIP API ============
+@app.get("/api/vip/status")
+def api_vip_status(user: str):
+    v = db_get_vip(user)
+    active = is_vip_active(v)
+    return {
+        "success": True,
+        "is_vip": active,
+        "vip_level": v["vip_level"],
+        "vip_expire": v["vip_expire"],
+    }
+
+
+@app.get("/api/vip/plans")
+def api_vip_plans():
+    return {"success": True, "plans": VIP_PLANS}
 
 
 @app.post("/api/room/create")
@@ -569,7 +646,9 @@ def admin_users_list(req: AdminAuth):
         result[u["username"]] = {
             "money": u["money"], "armor": u["armor"],
             "dmg": u["dmg"], "ammo": u["ammo"], "cans": u["cans"],
-            "tasks": u["tasks"] or {"kill": 0, "collect": 0, "extract": 0}
+            "tasks": u["tasks"] or {"kill": 0, "collect": 0, "extract": 0},
+            "vip_level": u.get("vip_level", 0) if isinstance(u, dict) else 0,
+            "vip_expire": u.get("vip_expire", 0) if isinstance(u, dict) else 0,
         }
     return {"success": True, "users": result}
 
@@ -725,6 +804,60 @@ def admin_task_delete(req: AdminTaskDelete):
     return {"success": True, "message": "已删除"}
 
 
+# ============ 管理后台 · VIP ============
+@app.post("/admin/vip/grant")
+def admin_vip_grant(req: VIPGrant):
+    if req.admin_key != ADMIN_KEY:
+        return {"success": False, "message": "密钥错误"}
+    if not db_get_user(req.user):
+        return {"success": False, "message": "用户不存在"}
+    plan = VIP_PLANS.get(req.plan)
+    if not plan:
+        return {"success": False, "message": "套餐不存在"}
+    if req.plan == "forever":
+        level = 4
+        expire = 0
+    else:
+        level = {"month": 1, "quarter": 2, "year": 3}.get(req.plan, 1)
+        cur_v = db_get_vip(req.user)
+        now = int(time.time())
+        base = cur_v["vip_expire"] if is_vip_active(cur_v) else now
+        expire = base + plan["days"] * 86400
+    db_set_vip(req.user, level, expire)
+    return {"success": True, "message": f"已为 {req.user} 开通 {plan['name']}"}
+
+
+@app.post("/admin/vip/revoke")
+def admin_vip_revoke(req: VIPRevoke):
+    if req.admin_key != ADMIN_KEY:
+        return {"success": False, "message": "密钥错误"}
+    db_set_vip(req.user, 0, 0)
+    return {"success": True, "message": f"已取消 {req.user} 的 VIP"}
+
+
+@app.get("/admin/vip/list")
+def admin_vip_list(admin_key: str = ""):
+    if admin_key != ADMIN_KEY:
+        return {"success": False, "message": "密钥错误"}
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT username, vip_level, vip_expire FROM users WHERE vip_level > 0")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    out = []
+    now = time.time()
+    for r in rows:
+        active = (r["vip_level"] == 4) or (r["vip_expire"] > now)
+        out.append({
+            "user": r["username"],
+            "vip_level": r["vip_level"],
+            "vip_expire": r["vip_expire"],
+            "active": active,
+        })
+    return {"success": True, "vips": out}
+
+
 # ============ WebSocket ============
 rooms_ws: Dict[str, List[WebSocket]] = {}
 conn_user: Dict[WebSocket, str] = {}
@@ -806,7 +939,7 @@ async def chat_endpoint(websocket: WebSocket, room_id: str, user_name: str):
             rooms_ws.pop(room_id, None)
 
 
-# ============ 根路由：GET + HEAD ============
+# ============ 根路由 ============
 @app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {"status": "ok"}
