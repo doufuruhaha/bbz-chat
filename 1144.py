@@ -4,8 +4,9 @@ import time
 import hashlib
 import uuid
 import threading
+import requests
 from typing import Dict, List
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -26,6 +27,17 @@ ADMIN_KEY = "bbz_admin_2026_change_me"
 
 # ============ 数据库连接 ============
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+# ============ 易支付配置 ============
+EZFP_PID = "5277"
+EZFP_KEY = "VsXD5kfifHxxq7mHRpdrZMHg4P8gDWJF"
+EZFP_MAPI = "https://www.ezfpy.cn/mapi.php"
+
+# Render 公网地址（易支付异步通知必须能访问）
+PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "https://bbz-chat-1.onrender.com")
+NOTIFY_URL = PUBLIC_BASE + "/ezfp/notify"
+RETURN_URL = PUBLIC_BASE + "/ezfp/return"
+
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -80,6 +92,22 @@ def init_db():
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_expire BIGINT DEFAULT 0")
     except Exception:
         pass
+    # VIP 订单表
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS vip_orders (
+            order_no TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            plan TEXT NOT NULL,
+            days INT NOT NULL,
+            price TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            create_time BIGINT,
+            pay_time BIGINT DEFAULT 0,
+            trade_no TEXT DEFAULT '',
+            qrcode TEXT DEFAULT '',
+            payurl TEXT DEFAULT ''
+        );
+    """)
     conn.commit()
     cur.close()
     conn.close()
@@ -241,6 +269,58 @@ def is_vip_active(v):
     if v["vip_level"] == 4:
         return True
     return v.get("vip_expire", 0) > time.time()
+
+
+# ============ VIP 订单数据库操作 ============
+def db_vip_order_create(order):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO vip_orders
+        (order_no, username, plan, days, price, status, create_time, qrcode, payurl)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (order["order_no"], order["username"], order["plan"],
+          order["days"], order["price"], order["status"],
+          order["create_time"], order["qrcode"], order["payurl"]))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def db_vip_order_get(order_no):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM vip_orders WHERE order_no=%s", (order_no,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row
+
+
+def db_vip_order_mark_paid(order_no, trade_no):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE vip_orders SET status='paid', pay_time=%s, trade_no=%s WHERE order_no=%s",
+        (int(time.time()), trade_no, order_no)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============ 易支付签名 ============
+def ezfp_sign(params: dict) -> str:
+    """易支付 V1 MD5 签名"""
+    filtered = {k: v for k, v in params.items()
+                if k not in ("sign", "sign_type") and str(v) not in ("", "None")}
+    raw = "&".join(f"{k}={filtered[k]}" for k in sorted(filtered)) + EZFP_KEY
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def ezfp_verify(params: dict) -> bool:
+    sign = params.get("sign", "")
+    return sign.lower() == ezfp_sign(params).lower()
 
 
 # ============ 默认任务池 ============
@@ -405,6 +485,16 @@ class VIPRevoke(BaseModel):
     user: str
 
 
+class VIPCreateOrderReq(BaseModel):
+    user: str
+    plan: str
+    pay_type: str = "alipay"
+
+
+class VIPQueryReq(BaseModel):
+    order_id: str
+
+
 # ============ 游戏 API ============
 @app.post("/api/register")
 def api_register(req: RegisterReq):
@@ -502,6 +592,132 @@ def api_vip_status(user: str):
 @app.get("/api/vip/plans")
 def api_vip_plans():
     return {"success": True, "plans": VIP_PLANS}
+
+
+@app.post("/api/vip/create_order")
+def api_vip_create_order(req: VIPCreateOrderReq):
+    if not db_get_user(req.user):
+        return {"success": False, "message": "用户不存在"}
+    plan = VIP_PLANS.get(req.plan)
+    if not plan:
+        return {"success": False, "message": "套餐不存在"}
+
+    order_no = f"VIP{req.user[:8]}{int(time.time()*1000)}"
+
+    params = {
+        "pid": EZFP_PID,
+        "type": req.pay_type,
+        "out_trade_no": order_no,
+        "name": f"VIP-{plan['name']}",
+        "money": f"{plan['price']:.2f}",
+        "notify_url": NOTIFY_URL,
+        "return_url": RETURN_URL,
+        "sitename": "八宝粥行动",
+        "clientip": "0.0.0.0",
+        "device": "pc",
+    }
+    params["sign"] = ezfp_sign(params)
+    params["sign_type"] = "MD5"
+
+    try:
+        r = requests.post(EZFP_MAPI, data=params, timeout=15)
+        res = r.json() if r.status_code == 200 else {"code": 0, "msg": f"HTTP {r.status_code}"}
+    except Exception as e:
+        return {"success": False, "message": f"网络错误: {e}"}
+
+    if res.get("code") != 1:
+        return {"success": False, "message": res.get("msg", "下单失败")}
+
+    db_vip_order_create({
+        "order_no": order_no,
+        "username": req.user,
+        "plan": req.plan,
+        "days": plan["days"],
+        "price": f"{plan['price']:.2f}",
+        "status": "pending",
+        "create_time": int(time.time()),
+        "qrcode": res.get("qrcode", ""),
+        "payurl": res.get("payurl", ""),
+    })
+
+    return {
+        "success": True,
+        "order_id": order_no,
+        "qrcode": res.get("qrcode", ""),
+        "payurl": res.get("payurl", ""),
+        "price": plan["price"],
+        "plan_name": plan["name"],
+    }
+
+
+@app.post("/api/vip/query")
+def api_vip_query(req: VIPQueryReq):
+    order = db_vip_order_get(req.order_id)
+    if not order:
+        return {"success": False, "message": "订单不存在"}
+    v = db_get_vip(order["username"])
+    return {
+        "success": True,
+        "status": order["status"],
+        "vip_expire": v["vip_expire"],
+    }
+
+
+# ============ 易支付异步通知 ============
+@app.api_route("/ezfp/notify", methods=["GET", "POST"])
+async def ezfp_notify(request: Request):
+    if request.method == "GET":
+        params = dict(request.query_params)
+    else:
+        form = await request.form()
+        params = dict(form)
+    print(f"[易支付通知] {params}")
+
+    if not ezfp_verify(params):
+        print("[易支付通知] 签名验证失败")
+        return Response(content="fail", media_type="text/plain")
+
+    if params.get("trade_status") != "TRADE_SUCCESS":
+        return Response(content="success", media_type="text/plain")
+
+    order_no = params.get("out_trade_no", "")
+    trade_no = params.get("trade_no", "")
+    money = params.get("money", "")
+
+    order = db_vip_order_get(order_no)
+    if not order:
+        print(f"[易支付通知] 订单不存在: {order_no}")
+        return Response(content="success", media_type="text/plain")
+
+    if order["status"] == "paid":
+        return Response(content="success", media_type="text/plain")
+
+    if str(order["price"]) != str(money):
+        print(f"[易支付通知] 金额不符: 订单 {order['price']} 收到 {money}")
+        return Response(content="fail", media_type="text/plain")
+
+    db_vip_order_mark_paid(order_no, trade_no)
+
+    username = order["username"]
+    days = order["days"]
+    plan_key = order["plan"]
+    if plan_key == "forever":
+        db_set_vip(username, 4, 0)
+    else:
+        cur_v = db_get_vip(username)
+        now = int(time.time())
+        base = cur_v["vip_expire"] if is_vip_active(cur_v) else now
+        expire = base + days * 86400
+        level = {"month": 1, "quarter": 2, "year": 3}.get(plan_key, 1)
+        db_set_vip(username, level, expire)
+
+    print(f"[易支付通知] ✅ {order_no} 支付成功，{username} +{days}天")
+    return Response(content="success", media_type="text/plain")
+
+
+@app.api_route("/ezfp/return", methods=["GET", "POST"])
+def ezfp_return():
+    return {"status": "ok", "message": "支付完成，请返回游戏"}
 
 
 @app.post("/api/room/create")
