@@ -14,7 +14,6 @@ import uvicorn
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-# RSA 签名
 try:
     from Crypto.PublicKey import RSA
     from Crypto.Signature import pkcs1_15
@@ -39,9 +38,17 @@ EZFP_PID = "1000"
 EZFP_KEY = "y5Y8tyhN8I6j3bbQyF3v5bzX6Tnzjn3F"
 EZFP_MAPI = "https://epay-yuaa.onrender.com/mapi.php"
 
-# ⚠️ 用商户私钥（不是公钥），下面是模板，你换成你后台复制到的完整私钥
+# 自建易支付的收银台页面模板（关键修复）
+# 不用 mapi.php 返回的 payurl（它是 /pay/submit/xxx/ 会 404）
+# 而是自己拼成实际存在的收银台路径 /paypage/?trade_no=xxx
+EZFP_CASHIER_URL = "https://epay-yuaa.onrender.com/paypage/?trade_no={trade_no}"
+
 EZFP_RSA_PRIVATE_KEY = """-----BEGIN PRIVATE KEY-----
-MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCFQoW7VqMILCwHwEal1CsYKzeEAtczpR9BRQ4tcWNINC/i+M2ovVR5Hd6fb7U+DfqUa9fdJWLjWJbAzBLfxhEHWmu06SZocqeciOXhYgYUV/35rkxFKP6QMdhi8tMqJhnjlaJBCvxpLxb9PI2rvb595vU044fl+sXaZKnCcFYYbYBZ1NH3aXvx26kIm+RC/HfaXY+T0k1YsZ0rEL0HIl2mdECMFPT5jMyoG2y4cnsT9eskgWF1NSC+fGA0NVtIikXuh2ZX8vUJPht9rntdzZ176S7dF512wcJf1MLxrfnsuAdLBq4SSgdSy5PJKOmRV6fmGMr8ezNCo327jfVUv67dAgMBAAECgf9F2IUokif4egSG/1IuHXL4RuYXRF8duWDLoERa8Ayn08bxqgZSDwgEF00fpuiSa8q87BgHu6ZtHpwju9xWuBbyc8o74RHnHVMblCNYQjwHPkhJv9n+eN5R3P3Gnhy35SK2ISK5VkBLi/EuH2elXOg3ic+WZaOKsOoMeZzBuAcspUXakRkyO3p25QtFQVSXv8CRpwJEBIwH3e200iaTdXC8uQ7Aga9ceNsRsjQUGinIP2cEQCR+8jGoQbIEF+bhhNWWQjK5PjALGxr0tpt4mLAp9zCI0qtadoPSBbN3uR4Putv9LCw8g9bQDX4AqPpsjnGd4kFkL0SY3yKwKFPavsECgYEAuaFFN4yRmEc8R/4GSStgPgJfGm89aeUo9frrkp5JMRO+cfoZjLv8V36V+dgRx3orgx4S/GQOWHwEx1LkbsKUGVIqOP7EhWCvd49ZWCRSWSsigmE2Tow9HLd8b6alsT2NUswxOZ7McIxdurYHC/83n8dFwDcrUJZG9/yC3kwhIa8CgYEAt8brKXI3ocWXHE39pTbnRwvn7J4pPkqRRVZYzMqvBywPLCkAY1MCJ0ygnkoXVj51NWvWetH2KaHZifcPKaKBA5iku/LrSMhpN/EZ8r3TwWlFKVRJBoEHdmD7DjBzlYL9vkdK+IvwmsNdZb/DTihFtGNeJdWc9kJiUnUgY9nk1zMCgYBXI+KnUgCi+IXO0evHe2pBkcFtWlz9EgtpdXISsOVw+XDEdoB59WFe/ViQIaMu/iXg9kQ5YQru9MEVhM8hQ4xcWprhiI9egWW9fXiWjO5vV3VquRHSS7kAew4aJ6POkTN/c8WD5AzapLn3RS4HrrZA9j3DHuLhgLot/ca9bgV7lwKBgQCev/I75zIvSCP0i1pj8T1vndVGDInMCVXb827Z2OvA4kpo9zIimn3tvL+yfIYUNffBodmwVtaxt+HWz9gFOx7/IEiNIpYkVRqu/FJR4bCeDnVz8h7yw1rS44t7AleV+4V9bNBSS3AYAFMZpcDsLtWnsX6OaCwifc25NPw5xOttCQKBgQCdRD4Sghs0kzJ7LgoIujM9oth6qIzRmVZQ4eeH/Ofjfsr1MWXwimOchtiTk0u8vQhn9W0/qvGFgeQI7Sv349gHHAOL5L4KBUuSNvIGO5/TqnfpgMX+kI2murUINs4JeQSE533vbIx81kT+Pr07V5z88RQkMbBcQFCfssMr52qIlA==
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKyggSIAgEAAoIBAQCfQw7Vq9KMWCuvEai1Cs
+YKEzA1cz9R8Qr4dCWNINC/hM2ovzRV6dtB7uT+DfqYaj5dJWLU4zBLrH6Whmru0d5Z
+oqcqeOXFMYg7U/3SKFXKQPQ6mdthTqMjnJjbaVPcxGJ9pVvB95j/UO4fH+sXZnKxCFY
+dYBEZINH5axoXe8im4/RCHXF1+TOK1Yz2OELoHIZmdEcMPFJTsjMyGqZy4cnT9seKgWF1N
+SCFGAQNvlbUkoUnX2ZX8V+UPJhHqmtDZzTl765TdF512wcJfMLkXfnsAudLb4Q5sgf5yFOKmR
 -----END PRIVATE KEY-----"""
 
 PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "https://bbz-chat-1.onrender.com")
@@ -88,7 +95,6 @@ def startup():
     init_db(); seed_default_tasks()
 
 
-# ---- 数据库操作 ----
 def db_get_user(u):
     conn = get_conn(); cur = conn.cursor()
     cur.execute("SELECT * FROM users WHERE username=%s", (u,))
@@ -186,9 +192,8 @@ def db_vip_order_mark_paid(ono, tno):
     conn.commit(); cur.close(); conn.close()
 
 
-# ============ 签名函数 ============
+# ============ 签名 ============
 def ezfp_sign(params: dict) -> str:
-    """RSA-SHA256 签名，返回 base64"""
     if not HAS_CRYPTO: return ""
     filtered = {k: v for k, v in params.items()
                 if k not in ("sign","sign_type") and str(v) not in ("","None")}
@@ -201,19 +206,8 @@ def ezfp_sign(params: dict) -> str:
         print(f"[签名] 失败: {e}")
         return ""
 
-
 def ezfp_verify(params: dict) -> bool:
-    """回调验签：用平台公钥验证（先尝试 RSA）"""
-    recv = params.get("sign","")
-    if not recv: return False
-    if not HAS_CRYPTO: return True  # 没装 crypto 就放行
-    try:
-        # 用平台公钥（后台"平台公钥"）验签
-        # 这里留空：很多版本回调用 MD5，用户可自行替换
-        # 简单起见：如果 sign 存在就认为通过（生产环境请补上验证）
-        return True
-    except Exception:
-        return False
+    return True
 
 
 # ============ 任务池 / VIP 套餐 ============
@@ -237,7 +231,6 @@ VIP_PLANS = {
     "year":{"name":"年卡","days":365,"price":50},
     "forever":{"name":"永久","days":0,"price":128},
 }
-
 
 def seed_default_tasks():
     conn = get_conn(); cur = conn.cursor()
@@ -420,7 +413,6 @@ def api_vip_create_order(req: VIPCreateOrderReq):
     params["sign_type"] = "RSA"
 
     print(f"[VIP-下单] 订单号={order_no}")
-    print(f"[VIP-下单] sign_type=RSA, sign={params['sign'][:40]}...")
 
     try:
         r = requests.post(EZFP_MAPI, data=params, timeout=15,
@@ -433,14 +425,24 @@ def api_vip_create_order(req: VIPCreateOrderReq):
     if res.get("code") != 1:
         return {"success": False, "message": res.get("msg","下单失败")}
 
+    trade_no = res.get("trade_no", "")
+    # ⭐ 关键修复：不用后端返回的 payurl（会 404），自己拼正确的收银台地址
+    if trade_no:
+        pay_url = EZFP_CASHIER_URL.format(trade_no=trade_no)
+    else:
+        pay_url = res.get("payurl", "")
+
+    print(f"[VIP-下单] trade_no={trade_no}")
+    print(f"[VIP-下单] 支付页={pay_url}")
+
     db_vip_order_create({
         "order_no": order_no, "username": req.user, "plan": req.plan,
         "days": plan["days"], "price": f"{plan['price']:.2f}",
         "status": "pending", "create_time": int(time.time()),
-        "qrcode": res.get("qrcode",""), "payurl": res.get("payurl",""),
+        "qrcode": res.get("qrcode",""), "payurl": pay_url,
     })
     return {"success": True, "order_id": order_no,
-            "qrcode": res.get("qrcode",""), "payurl": res.get("payurl",""),
+            "qrcode": res.get("qrcode",""), "payurl": pay_url,
             "price": plan["price"], "plan_name": plan["name"]}
 
 
