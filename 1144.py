@@ -24,14 +24,12 @@ app.add_middleware(
 )
 
 ADMIN_KEY = "bbz_admin_2026_change_me"
-
-# ============ 数据库连接 ============
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
-# ============ 易支付配置（自建） ============
+# ============ 易支付配置（自建 epay-yuaa） ============
 EZFP_PID = "1000"
-EZFP_KEY = "DXBfRnno4kBonQPUXNnfdfU7PiIIi6iR"
-EZFP_MAPI = "https://wangzhane.hyperphp.com/mapi.php"
+EZFP_KEY = "y5Y8tyhN8I6j3bbQyF3v5bzX6Tnzjn3F"
+EZFP_MAPI = "https://epay-yuaa.onrender.com/mapi.php"
 
 PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "https://bbz-chat-1.onrender.com")
 NOTIFY_URL = PUBLIC_BASE + "/ezfp/notify"
@@ -179,7 +177,6 @@ def db_all_users():
     return rows
 
 
-# ============ 任务系统数据库操作 ============
 def db_task_defs_all():
     conn = get_conn()
     cur = conn.cursor()
@@ -237,7 +234,6 @@ def db_daily_set(data):
     conn.close()
 
 
-# ============ VIP 数据库操作 ============
 def db_get_vip(username):
     conn = get_conn()
     cur = conn.cursor()
@@ -268,7 +264,6 @@ def is_vip_active(v):
     return v.get("vip_expire", 0) > time.time()
 
 
-# ============ VIP 订单数据库操作 ============
 def db_vip_order_create(order):
     conn = get_conn()
     cur = conn.cursor()
@@ -306,7 +301,6 @@ def db_vip_order_mark_paid(order_no, trade_no):
     conn.close()
 
 
-# ============ 易支付签名 ============
 def ezfp_sign(params: dict) -> str:
     filtered = {k: v for k, v in params.items()
                 if k not in ("sign", "sign_type") and str(v) not in ("", "None")}
@@ -319,7 +313,6 @@ def ezfp_verify(params: dict) -> bool:
     return sign.lower() == ezfp_sign(params).lower()
 
 
-# ============ 默认任务池 ============
 DEFAULT_TASK_DEFS = {
     "sniper_kill_3":    {"name": "神枪手",     "desc": "用狙击枪击杀 3 名敌人",     "metric": "sniper_kills",          "target": 3, "reward": 400},
     "kill_8":           {"name": "清道夫",     "desc": "击杀 8 名敌人",             "metric": "kills",                 "target": 8, "reward": 350},
@@ -334,7 +327,6 @@ DEFAULT_TASK_DEFS = {
     "full_backpack":    {"name": "满载而归",   "desc": "背包满时成功撤离 1 次",     "metric": "full_backpack_extracts","target": 1, "reward": 450},
 }
 
-# ============ VIP 套餐 ============
 VIP_PLANS = {
     "month":    {"name": "月卡", "days": 30,  "price": 6},
     "quarter":  {"name": "季卡", "days": 90,  "price": 15},
@@ -593,19 +585,16 @@ def api_vip_plans():
 @app.post("/api/vip/create_order")
 def api_vip_create_order(req: VIPCreateOrderReq):
     print("=" * 60)
-    print(f"[VIP-下单] 收到请求 user={req.user} plan={req.plan} pay_type={req.pay_type}")
+    print(f"[VIP-下单] user={req.user} plan={req.plan} pay_type={req.pay_type}")
 
     if not db_get_user(req.user):
-        print(f"[VIP-下单] 用户不存在: {req.user}")
         return {"success": False, "message": "用户不存在"}
-
     plan = VIP_PLANS.get(req.plan)
     if not plan:
-        print(f"[VIP-下单] 套餐不存在: {req.plan}")
         return {"success": False, "message": "套餐不存在"}
 
     order_no = f"VIP{req.user[:8]}{int(time.time()*1000)}"
-    print(f"[VIP-下单] 生成订单号: {order_no}")
+    print(f"[VIP-下单] 订单号: {order_no}")
 
     params = {
         "pid": EZFP_PID,
@@ -623,27 +612,20 @@ def api_vip_create_order(req: VIPCreateOrderReq):
     params["sign_type"] = "MD5"
 
     print(f"[VIP-下单] 请求易支付: {EZFP_MAPI}")
-    print(f"[VIP-下单] notify_url = {NOTIFY_URL}")
-    print(f"[VIP-下单] 参数 = {params}")
-
     try:
-        r = requests.post(EZFP_MAPI, data=params, timeout=15)
-        print(f"[VIP-下单] 易支付 HTTP {r.status_code}")
-        print(f"[VIP-下单] 易支付原始响应: {r.text[:500]}")
+        r = requests.post(EZFP_MAPI, data=params, timeout=15,
+                          proxies={"http": None, "https": None})
+        print(f"[VIP-下单] HTTP {r.status_code}")
+        print(f"[VIP-下单] 响应: {r.text[:500]}")
         res = r.json() if r.status_code == 200 else {"code": 0, "msg": f"HTTP {r.status_code}"}
     except Exception as e:
-        print(f"[VIP-下单] 请求易支付异常: {e}")
+        print(f"[VIP-下单] 异常: {e}")
         return {"success": False, "message": f"网络错误: {e}"}
 
     if res.get("code") != 1:
         msg = res.get("msg", "下单失败")
         print(f"[VIP-下单] 易支付拒绝: {msg}")
-        print(f"[VIP-下单] 完整响应: {res}")
         return {"success": False, "message": msg}
-
-    print(f"[VIP-下单] 易支付成功")
-    print(f"[VIP-下单] qrcode 长度 = {len(res.get('qrcode', ''))}")
-    print(f"[VIP-下单] payurl = {res.get('payurl', '')}")
 
     db_vip_order_create({
         "order_no": order_no,
@@ -656,8 +638,6 @@ def api_vip_create_order(req: VIPCreateOrderReq):
         "qrcode": res.get("qrcode", ""),
         "payurl": res.get("payurl", ""),
     })
-    print(f"[VIP-下单] 已入库 vip_orders: {order_no}")
-    print("=" * 60)
 
     return {
         "success": True,
@@ -673,10 +653,8 @@ def api_vip_create_order(req: VIPCreateOrderReq):
 def api_vip_query(req: VIPQueryReq):
     order = db_vip_order_get(req.order_id)
     if not order:
-        print(f"[VIP-查询] 订单不存在: {req.order_id}")
         return {"success": False, "message": "订单不存在"}
     v = db_get_vip(order["username"])
-    print(f"[VIP-查询] {req.order_id} status={order['status']} user={order['username']}")
     return {
         "success": True,
         "status": order["status"],
@@ -688,7 +666,7 @@ def api_vip_query(req: VIPQueryReq):
 @app.api_route("/ezfp/notify", methods=["GET", "POST"])
 async def ezfp_notify(request: Request):
     print("=" * 60)
-    print(f"[VIP-回调] 收到易支付通知 method={request.method}")
+    print(f"[VIP-回调] method={request.method}")
     if request.method == "GET":
         params = dict(request.query_params)
     else:
@@ -696,48 +674,36 @@ async def ezfp_notify(request: Request):
         params = dict(form)
     print(f"[VIP-回调] 参数 = {params}")
 
-    sign_ok = ezfp_verify(params)
-    print(f"[VIP-回调] 签名验证 = {'通过' if sign_ok else '失败'}")
-    if not sign_ok:
-        print(f"[VIP-回调] 期望签名 = {ezfp_sign(params)}")
-        print(f"[VIP-回调] 收到签名 = {params.get('sign')}")
+    if not ezfp_verify(params):
+        print("[VIP-回调] 签名失败")
         return Response(content="fail", media_type="text/plain")
 
-    status = params.get("trade_status")
-    print(f"[VIP-回调] 交易状态 = {status}")
-    if status != "TRADE_SUCCESS":
+    if params.get("trade_status") != "TRADE_SUCCESS":
         return Response(content="success", media_type="text/plain")
 
     order_no = params.get("out_trade_no", "")
     trade_no = params.get("trade_no", "")
     money = params.get("money", "")
-    print(f"[VIP-回调] 订单号={order_no} 交易号={trade_no} 金额={money}")
 
     order = db_vip_order_get(order_no)
     if not order:
         print(f"[VIP-回调] 订单不存在: {order_no}")
         return Response(content="success", media_type="text/plain")
 
-    print(f"[VIP-回调] 订单详情: 用户={order['username']} 套餐={order['plan']} "
-          f"价格={order['price']} 状态={order['status']}")
-
     if order["status"] == "paid":
-        print(f"[VIP-回调] 订单已支付，忽略（幂等）")
         return Response(content="success", media_type="text/plain")
 
     if str(order["price"]) != str(money):
-        print(f"[VIP-回调] 金额不符: 订单={order['price']} 收到={money}")
+        print(f"[VIP-回调] 金额不符")
         return Response(content="fail", media_type="text/plain")
 
     db_vip_order_mark_paid(order_no, trade_no)
-    print(f"[VIP-回调] 订单已标记 paid")
 
     username = order["username"]
     days = order["days"]
     plan_key = order["plan"]
     if plan_key == "forever":
         db_set_vip(username, 4, 0)
-        print(f"[VIP-回调] {username} 永久VIP")
     else:
         cur_v = db_get_vip(username)
         now = int(time.time())
@@ -745,10 +711,8 @@ async def ezfp_notify(request: Request):
         expire = base + days * 86400
         level = {"month": 1, "quarter": 2, "year": 3}.get(plan_key, 1)
         db_set_vip(username, level, expire)
-        t_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(expire))
-        print(f"[VIP-回调] {username} +{days}天，到期 {t_str}")
 
-    print("=" * 60)
+    print(f"[VIP-回调] ✅ {order_no} 支付成功")
     return Response(content="success", media_type="text/plain")
 
 
@@ -757,6 +721,7 @@ def ezfp_return():
     return {"status": "ok", "message": "支付完成，请返回游戏"}
 
 
+# ============ 房间 API ============
 @app.post("/api/room/create")
 def api_room_create(req: RoomCreateReq):
     room_id = f"room_{int(time.time())}_{uuid.uuid4().hex[:4]}"
@@ -1057,7 +1022,6 @@ def admin_task_delete(req: AdminTaskDelete):
     return {"success": True, "message": "已删除"}
 
 
-# ============ 管理后台 · VIP ============
 @app.post("/admin/vip/grant")
 def admin_vip_grant(req: VIPGrant):
     if req.admin_key != ADMIN_KEY:
@@ -1192,7 +1156,6 @@ async def chat_endpoint(websocket: WebSocket, room_id: str, user_name: str):
             rooms_ws.pop(room_id, None)
 
 
-# ============ 根路由 ============
 @app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {"status": "ok"}
