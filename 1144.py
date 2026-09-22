@@ -14,9 +14,11 @@ import uvicorn
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+# RSA 签名
 try:
     from Crypto.PublicKey import RSA
-    from Crypto.Cipher import PKCS1_v1_5
+    from Crypto.Signature import pkcs1_15
+    from Crypto.Hash import SHA256
     HAS_CRYPTO = True
 except Exception:
     HAS_CRYPTO = False
@@ -36,15 +38,12 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 EZFP_PID = "1000"
 EZFP_KEY = "y5Y8tyhN8I6j3bbQyF3v5bzX6Tnzjn3F"
 EZFP_MAPI = "https://epay-yuaa.onrender.com/mapi.php"
-EZFP_CASHIER_URL = "https://epay-yuaa.onrender.com/paypage/?trade_no={trade_no}"
+EZFP_CASHIER_URL = "https://epay-yuaa.onrender.com/cashier.php?trade_no={trade_no}"
 
-# ⚠️ 商户私钥（用后台"查看商户RSA密钥对"里复制到的完整私钥）
+# ⚠️ 商户私钥（用后台"查看商户RSA密钥对"→"复制"拿到的完整私钥）
+# 完整 PEM 应该是 25+ 行，头尾带 -----BEGIN PRIVATE KEY----- / -----END PRIVATE KEY-----
 EZFP_RSA_PRIVATE_KEY = """-----BEGIN PRIVATE KEY-----
-MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKyggSIAgEAAoIBAQCfQw7Vq9KMWCuvEai1Cs
-YKEzA1cz9R8Qr4dCWNINC/hM2ovzRV6dtB7uT+DfqYaj5dJWLU4zBLrH6Whmru0d5Z
-oqcqeOXFMYg7U/3SKFXKQPQ6mdthTqMjnJjbaVPcxGJ9pVvB95j/UO4fH+sXZnKxCFY
-dYBEZINH5axoXe8im4/RCHXF1+TOK1Yz2OELoHIZmdEcMPFJTsjMyGqZy4cnT9seKgWF1N
-SCFGAQNvlbUkoUnX2ZX8V+UPJhHqmtDZzTl765TdF512wcJfMLkXfnsAudLb4Q5sgf5yFOKmR
+（这里粘贴你后台复制到的完整私钥）
 -----END PRIVATE KEY-----"""
 
 PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "https://bbz-chat-1.onrender.com")
@@ -189,23 +188,35 @@ def db_vip_order_mark_paid(ono, tno):
     conn.commit(); cur.close(); conn.close()
 
 
-# ============ 签名（严格按 SignUtil.php 的逻辑） ============
+# ============ 签名（严格对齐 Payment.php 的 makeSign） ============
 def ezfp_sign(params: dict) -> str:
-    """先 SHA256 拼接串 → 得到 hex → RSA PKCS1 加密 hex → Base64"""
+    """
+    对齐 Payment.php:
+      getSignContent: ksort 后拼接 k=v&k=v，排除 sign/sign_type/空值/数组
+      RSA: openssl_sign($signStr, $sign, $pkey, OPENSSL_ALGO_SHA256) → base64
+    """
     if not HAS_CRYPTO:
         return ""
-    filtered = {k: v for k, v in params.items()
-                if k not in ("sign", "sign_type") and str(v) not in ("", "None")}
+    filtered = {}
+    for k, v in params.items():
+        if k in ("sign", "sign_type"):
+            continue
+        if isinstance(v, (list, dict)):
+            continue
+        if v is None or str(v).strip() == "":
+            continue
+        filtered[k] = v
     raw = "&".join(f"{k}={filtered[k]}" for k in sorted(filtered))
+    print(f"[签名] 原文 = {raw}")
     try:
-        sha_hex = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         key = RSA.import_key(EZFP_RSA_PRIVATE_KEY)
-        cipher = PKCS1_v1_5.new(key)
-        encrypted = cipher.encrypt(sha_hex.encode("utf-8"))
-        return base64.b64encode(encrypted).decode("utf-8")
+        h = SHA256.new(raw.encode("utf-8"))
+        sig = pkcs1_15.new(key).sign(h)
+        return base64.b64encode(sig).decode("utf-8")
     except Exception as e:
         print(f"[签名] 失败: {e}")
         return ""
+
 
 def ezfp_verify(params: dict) -> bool:
     return True
@@ -409,19 +420,21 @@ def api_vip_create_order(req: VIPCreateOrderReq):
         "money": f"{plan['price']:.2f}",
         "notify_url": NOTIFY_URL, "return_url": RETURN_URL,
         "sitename": "八宝粥行动", "clientip": "0.0.0.0", "device": "pc",
+        "sign_type": "RSA",
     }
     params["sign"] = ezfp_sign(params)
-    params["sign_type"] = "RSA"
 
     print(f"[VIP-下单] 订单号={order_no}")
-    print(f"[VIP-下单] 签名={params['sign'][:40]}...")
+    print(f"[VIP-下单] 签名={params['sign'][:40] if params['sign'] else '空'}...")
 
     try:
         r = requests.post(EZFP_MAPI, data=params, timeout=15,
                           proxies={"http": None, "https": None})
-        print(f"[VIP-下单] HTTP {r.status_code}: {r.text[:300]}")
-        res = r.json() if r.status_code == 200 else {"code": 0, "msg": "HTTP 错误"}
+        print(f"[VIP-下单] HTTP {r.status_code}")
+        print(f"[VIP-下单] 原始响应: {r.text[:500]}")
+        res = r.json() if r.status_code == 200 else {"code": 0, "msg": f"HTTP {r.status_code}"}
     except Exception as e:
+        print(f"[VIP-下单] 异常: {e}")
         return {"success": False, "message": f"网络错误: {e}"}
 
     if res.get("code") != 1:
@@ -433,6 +446,7 @@ def api_vip_create_order(req: VIPCreateOrderReq):
     else:
         pay_url = res.get("payurl", "")
 
+    print(f"[VIP-下单] trade_no={trade_no}")
     print(f"[VIP-下单] 支付页={pay_url}")
 
     db_vip_order_create({
