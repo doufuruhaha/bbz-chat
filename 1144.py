@@ -16,12 +16,11 @@ from psycopg2.extras import RealDictCursor
 
 try:
     from Crypto.PublicKey import RSA
-    from Crypto.Signature import pkcs1_15
-    from Crypto.Hash import SHA256
+    from Crypto.Cipher import PKCS1_v1_5
     HAS_CRYPTO = True
 except Exception:
     HAS_CRYPTO = False
-    print("[警告] pycryptodome 未安装，RSA 签名不可用")
+    print("[警告] pycryptodome 未安装")
 
 app = FastAPI()
 app.add_middleware(
@@ -37,12 +36,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 EZFP_PID = "1000"
 EZFP_KEY = "y5Y8tyhN8I6j3bbQyF3v5bzX6Tnzjn3F"
 EZFP_MAPI = "https://epay-yuaa.onrender.com/mapi.php"
-
-# 自建易支付的收银台页面模板（关键修复）
-# 不用 mapi.php 返回的 payurl（它是 /pay/submit/xxx/ 会 404）
-# 而是自己拼成实际存在的收银台路径 /paypage/?trade_no=xxx
 EZFP_CASHIER_URL = "https://epay-yuaa.onrender.com/paypage/?trade_no={trade_no}"
 
+# ⚠️ 商户私钥（用后台"查看商户RSA密钥对"里复制到的完整私钥）
 EZFP_RSA_PRIVATE_KEY = """-----BEGIN PRIVATE KEY-----
 MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKyggSIAgEAAoIBAQCfQw7Vq9KMWCuvEai1Cs
 YKEzA1cz9R8Qr4dCWNINC/hM2ovzRV6dtB7uT+DfqYaj5dJWLU4zBLrH6Whmru0d5Z
@@ -95,6 +91,7 @@ def startup():
     init_db(); seed_default_tasks()
 
 
+# ---- 数据库操作 ----
 def db_get_user(u):
     conn = get_conn(); cur = conn.cursor()
     cur.execute("SELECT * FROM users WHERE username=%s", (u,))
@@ -192,16 +189,20 @@ def db_vip_order_mark_paid(ono, tno):
     conn.commit(); cur.close(); conn.close()
 
 
-# ============ 签名 ============
+# ============ 签名（严格按 SignUtil.php 的逻辑） ============
 def ezfp_sign(params: dict) -> str:
-    if not HAS_CRYPTO: return ""
+    """先 SHA256 拼接串 → 得到 hex → RSA PKCS1 加密 hex → Base64"""
+    if not HAS_CRYPTO:
+        return ""
     filtered = {k: v for k, v in params.items()
-                if k not in ("sign","sign_type") and str(v) not in ("","None")}
+                if k not in ("sign", "sign_type") and str(v) not in ("", "None")}
     raw = "&".join(f"{k}={filtered[k]}" for k in sorted(filtered))
     try:
+        sha_hex = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         key = RSA.import_key(EZFP_RSA_PRIVATE_KEY)
-        h = SHA256.new(raw.encode("utf-8"))
-        return base64.b64encode(pkcs1_15.new(key).sign(h)).decode()
+        cipher = PKCS1_v1_5.new(key)
+        encrypted = cipher.encrypt(sha_hex.encode("utf-8"))
+        return base64.b64encode(encrypted).decode("utf-8")
     except Exception as e:
         print(f"[签名] 失败: {e}")
         return ""
@@ -413,6 +414,7 @@ def api_vip_create_order(req: VIPCreateOrderReq):
     params["sign_type"] = "RSA"
 
     print(f"[VIP-下单] 订单号={order_no}")
+    print(f"[VIP-下单] 签名={params['sign'][:40]}...")
 
     try:
         r = requests.post(EZFP_MAPI, data=params, timeout=15,
@@ -426,13 +428,11 @@ def api_vip_create_order(req: VIPCreateOrderReq):
         return {"success": False, "message": res.get("msg","下单失败")}
 
     trade_no = res.get("trade_no", "")
-    # ⭐ 关键修复：不用后端返回的 payurl（会 404），自己拼正确的收银台地址
     if trade_no:
         pay_url = EZFP_CASHIER_URL.format(trade_no=trade_no)
     else:
         pay_url = res.get("payurl", "")
 
-    print(f"[VIP-下单] trade_no={trade_no}")
     print(f"[VIP-下单] 支付页={pay_url}")
 
     db_vip_order_create({
