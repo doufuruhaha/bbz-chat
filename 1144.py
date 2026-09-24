@@ -14,7 +14,6 @@ import uvicorn
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-# RSA 签名
 try:
     from Crypto.PublicKey import RSA
     from Crypto.Signature import pkcs1_15
@@ -40,8 +39,7 @@ EZFP_KEY = "y5Y8tyhN8I6j3bbQyF3v5bzX6Tnzjn3F"
 EZFP_MAPI = "https://epay-yuaa.onrender.com/mapi.php"
 EZFP_CASHIER_URL = "https://epay-yuaa.onrender.com/cashier.php?trade_no={trade_no}"
 
-# ⚠️ 商户私钥（用后台"查看商户RSA密钥对"→"复制"拿到的完整私钥）
-# 完整 PEM 应该是 25+ 行，头尾带 -----BEGIN PRIVATE KEY----- / -----END PRIVATE KEY-----
+# ⚠️ 商户RSA私钥（从后台"查看商户RSA密钥对"→"复制"按钮拿到，粘贴在这里，保留头尾）
 EZFP_RSA_PRIVATE_KEY = """-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQChQyq3GDG+W1UPUxZ1FGt62FTwezVvaKkC1Fjza49mH8B+WTSPhxhgO/0wjHe288BdZRBSLiC5kTMS8K2kajsZSdAwba28o81LzCYjR4gtIXmssVhChlDQG2uDCdnzL8rzZpc69WwasHYoaHhE5xe6lseiV8qYIJCPzp9wqwvdtxZ34vuOfCIkpfajmaC34FEDYAxbMB8qgXifdu8O6Sq0JsLCAlofikiiE2bHPe7+EFgSb4dPjtAznJl4xGjARNO58Ih+LoGRSqhEq+v7N2cpqaCnJrGGEGOvACF6cH2SgYW7NSl7AFEagciXxOxDU3JtM9ubXjXqGm1pMRX9OQhlAgMBAAECggEALhOYcV9G20qSV8IYURSoDx4fyuSRZIdFf0r4LXkmrHnXEOLhKz9g/iI12jjQfeRQqv7U9n46mHr92mQNYUR/JV8bTrMP6K3u20D2Bq+KH8cIUokLnFpvXb7v7a2TajJWLUy7WjvEiy2vXSVYc+uJsqUhXmfyOZxYYdaaZOFijxMsW2Rlxm/2ARxqvaYrvpJIELNCNGs1CPv7wd4kQVzqYrWOf+zY3b8GR9ZKfCijvZe40E7nlOUYtbUjp8qx5VlIstgniE6blUpcIqSmKAZqclpoioG4zrHtRRBwRwS5Gfrq5yYYybIPcX+FDeHejb7broVgsLHtyFsQX3pcgZC4kwKBgQDW9q3ZQv5icwtkPIsTwcbrpzg2U78He4mA+i5PHw0TJ/4kr6UkzJAE39X7ZbZdBRejmMd13x7W9rap1Xpwpya2vuZ1fN8U88g1ZugBIrqvTt10KTJATQ/r7CT4eBj493RPg7VtCBaJ0LMUiep791fuOZUQOKhyljhmHaiW2XvD9wKBgQDADBi60eH3YCUhqYHEHw0JCeQ/ODxIA+9S6OVexCvMamz/ePDxLcQemjItZX4Vcf1Mvp4ts0fAYc4+6wYVDZjhQZkxXo8/8G7YX/dE5TwNxkPxF4GSlN57UNeg27iBtGCS0VdIrxwLqfwci16c18PM6d7F1YajgQp9+yEygbgHgwKBgDFnZDEomnpZ4mZZG8WgpW0Hc33Y5XB8ze9ckEQS6NhcOqaHz7aTZQ4Zu34ZtD3Qq8wnkr/eVaIl9Xk23PsDD3y0hxa9ai/Qj1Tmn6+TIcCkqXTG+wuYKm6YSS7puyONC6gypwG1+CgYVPAFemSfRhA0H7QosV4UdEXTzylMNoulAoGBAIVpIdjOKrKliMXssifjBjQsOfItB7tjeGLZRVXi4yY7HIMQqhhxGZfEuGzO35rYOAWTOeE3dPXRO+x7ahs/+d8pqdkg/lSFmwsXB3hF4sUS4WnfUXTZlACIdXLakD8SZjA32vG0K8Bykp/ltZExVmTIZqh6H/D/mKFRzor+kDAvAoGAYi9QcMR3mktXPG+donoV3/n7y8eJbfn4n70ZJmXvNXNsAyUxxoFe7C/VmrEQP1CO2jCX0VWYnQnevxEBtp5E03WTvqfsZK3Sy+CsTHlGJe6bJC1NMyBxaVF/84EGW+Kb5Qu3CEf5NRV/NwVHdeUr+rAmQCz8BDf9ss6ATM7IvMo=
 -----END PRIVATE KEY-----"""
@@ -90,7 +88,6 @@ def startup():
     init_db(); seed_default_tasks()
 
 
-# ---- 数据库操作 ----
 def db_get_user(u):
     conn = get_conn(); cur = conn.cursor()
     cur.execute("SELECT * FROM users WHERE username=%s", (u,))
@@ -188,13 +185,8 @@ def db_vip_order_mark_paid(ono, tno):
     conn.commit(); cur.close(); conn.close()
 
 
-# ============ 签名（严格对齐 Payment.php 的 makeSign） ============
+# ============ 签名（SHA256withRSA，对齐 Payment.php 的 makeSign） ============
 def ezfp_sign(params: dict) -> str:
-    """
-    对齐 Payment.php:
-      getSignContent: ksort 后拼接 k=v&k=v，排除 sign/sign_type/空值/数组
-      RSA: openssl_sign($signStr, $sign, $pkey, OPENSSL_ALGO_SHA256) → base64
-    """
     if not HAS_CRYPTO:
         return ""
     filtered = {}
@@ -420,9 +412,9 @@ def api_vip_create_order(req: VIPCreateOrderReq):
         "money": f"{plan['price']:.2f}",
         "notify_url": NOTIFY_URL, "return_url": RETURN_URL,
         "sitename": "八宝粥行动", "clientip": "0.0.0.0", "device": "pc",
-        "sign_type": "RSA",
     }
     params["sign"] = ezfp_sign(params)
+    params["sign_type"] = "RSA"
 
     print(f"[VIP-下单] 订单号={order_no}")
     print(f"[VIP-下单] 签名={params['sign'][:40] if params['sign'] else '空'}...")
