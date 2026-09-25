@@ -2,7 +2,6 @@ import json
 import os
 import time
 import hashlib
-import base64
 import uuid
 import threading
 import requests
@@ -14,15 +13,6 @@ import uvicorn
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-try:
-    from Crypto.PublicKey import RSA
-    from Crypto.Signature import pkcs1_15
-    from Crypto.Hash import SHA256
-    HAS_CRYPTO = True
-except Exception:
-    HAS_CRYPTO = False
-    print("[警告] pycryptodome 未安装")
-
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -33,20 +23,15 @@ app.add_middleware(
 ADMIN_KEY = "bbz_admin_2026_change_me"
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
-# ============ 自建易支付配置 ============
-EZFP_PID = "1000"
-EZFP_KEY = "y5Y8tyhN8I6j3bbQyF3v5bzX6Tnzjn3F"
-EZFP_MAPI = "https://epay-yuaa.onrender.com/mapi.php"
-EZFP_CASHIER_URL = "https://epay-yuaa.onrender.com/cashier.php?trade_no={trade_no}"
-
-# ⚠️ 商户RSA私钥（从后台"查看商户RSA密钥对"→"复制"按钮拿到，粘贴在这里，保留头尾）
-EZFP_RSA_PRIVATE_KEY = """-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQChQyq3GDG+W1UPUxZ1FGt62FTwezVvaKkC1Fjza49mH8B+WTSPhxhgO/0wjHe288BdZRBSLiC5kTMS8K2kajsZSdAwba28o81LzCYjR4gtIXmssVhChlDQG2uDCdnzL8rzZpc69WwasHYoaHhE5xe6lseiV8qYIJCPzp9wqwvdtxZ34vuOfCIkpfajmaC34FEDYAxbMB8qgXifdu8O6Sq0JsLCAlofikiiE2bHPe7+EFgSb4dPjtAznJl4xGjARNO58Ih+LoGRSqhEq+v7N2cpqaCnJrGGEGOvACF6cH2SgYW7NSl7AFEagciXxOxDU3JtM9ubXjXqGm1pMRX9OQhlAgMBAAECggEALhOYcV9G20qSV8IYURSoDx4fyuSRZIdFf0r4LXkmrHnXEOLhKz9g/iI12jjQfeRQqv7U9n46mHr92mQNYUR/JV8bTrMP6K3u20D2Bq+KH8cIUokLnFpvXb7v7a2TajJWLUy7WjvEiy2vXSVYc+uJsqUhXmfyOZxYYdaaZOFijxMsW2Rlxm/2ARxqvaYrvpJIELNCNGs1CPv7wd4kQVzqYrWOf+zY3b8GR9ZKfCijvZe40E7nlOUYtbUjp8qx5VlIstgniE6blUpcIqSmKAZqclpoioG4zrHtRRBwRwS5Gfrq5yYYybIPcX+FDeHejb7broVgsLHtyFsQX3pcgZC4kwKBgQDW9q3ZQv5icwtkPIsTwcbrpzg2U78He4mA+i5PHw0TJ/4kr6UkzJAE39X7ZbZdBRejmMd13x7W9rap1Xpwpya2vuZ1fN8U88g1ZugBIrqvTt10KTJATQ/r7CT4eBj493RPg7VtCBaJ0LMUiep791fuOZUQOKhyljhmHaiW2XvD9wKBgQDADBi60eH3YCUhqYHEHw0JCeQ/ODxIA+9S6OVexCvMamz/ePDxLcQemjItZX4Vcf1Mvp4ts0fAYc4+6wYVDZjhQZkxXo8/8G7YX/dE5TwNxkPxF4GSlN57UNeg27iBtGCS0VdIrxwLqfwci16c18PM6d7F1YajgQp9+yEygbgHgwKBgDFnZDEomnpZ4mZZG8WgpW0Hc33Y5XB8ze9ckEQS6NhcOqaHz7aTZQ4Zu34ZtD3Qq8wnkr/eVaIl9Xk23PsDD3y0hxa9ai/Qj1Tmn6+TIcCkqXTG+wuYKm6YSS7puyONC6gypwG1+CgYVPAFemSfRhA0H7QosV4UdEXTzylMNoulAoGBAIVpIdjOKrKliMXssifjBjQsOfItB7tjeGLZRVXi4yY7HIMQqhhxGZfEuGzO35rYOAWTOeE3dPXRO+x7ahs/+d8pqdkg/lSFmwsXB3hF4sUS4WnfUXTZlACIdXLakD8SZjA32vG0K8Bykp/ltZExVmTIZqh6H/D/mKFRzor+kDAvAoGAYi9QcMR3mktXPG+donoV3/n7y8eJbfn4n70ZJmXvNXNsAyUxxoFe7C/VmrEQP1CO2jCX0VWYnQnevxEBtp5E03WTvqfsZK3Sy+CsTHlGJe6bJC1NMyBxaVF/84EGW+Kb5Qu3CEf5NRV/NwVHdeUr+rAmQCz8BDf9ss6ATM7IvMo=
------END PRIVATE KEY-----"""
+# ============ 虎皮椒配置 ============
+# ⚠️ 去虎皮椒后台重置密钥后，把新的 AppID 和 AppSecret 填到这里
+XUNHU_APPID = "201906180376"
+XUNHU_APPSECRET = "eab7112c6442e0c92479973d74caec7c"
+XUNHU_API = "https://api.xunhupay.com/payment/do.html"
 
 PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "https://bbz-chat-1.onrender.com")
-NOTIFY_URL = PUBLIC_BASE + "/ezfp/notify"
-RETURN_URL = PUBLIC_BASE + "/ezfp/return"
+NOTIFY_URL = PUBLIC_BASE + "/xunhu/notify"
+RETURN_URL = PUBLIC_BASE + "/xunhu/return"
 
 
 def get_conn():
@@ -185,33 +170,17 @@ def db_vip_order_mark_paid(ono, tno):
     conn.commit(); cur.close(); conn.close()
 
 
-# ============ 签名（SHA256withRSA，对齐 Payment.php 的 makeSign） ============
-def ezfp_sign(params: dict) -> str:
-    if not HAS_CRYPTO:
-        return ""
-    filtered = {}
-    for k, v in params.items():
-        if k in ("sign", "sign_type"):
-            continue
-        if isinstance(v, (list, dict)):
-            continue
-        if v is None or str(v).strip() == "":
-            continue
-        filtered[k] = v
-    raw = "&".join(f"{k}={filtered[k]}" for k in sorted(filtered))
-    print(f"[签名] 原文 = {raw}")
-    try:
-        key = RSA.import_key(EZFP_RSA_PRIVATE_KEY)
-        h = SHA256.new(raw.encode("utf-8"))
-        sig = pkcs1_15.new(key).sign(h)
-        return base64.b64encode(sig).decode("utf-8")
-    except Exception as e:
-        print(f"[签名] 失败: {e}")
-        return ""
+# ============ 虎皮椒签名 ============
+def xunhu_sign(params: dict) -> str:
+    filtered = {k: v for k, v in params.items()
+                if k != "hash" and str(v) not in ("", "None")}
+    raw = "&".join(f"{k}={filtered[k]}" for k in sorted(filtered)) + XUNHU_APPSECRET
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
-def ezfp_verify(params: dict) -> bool:
-    return True
+def xunhu_verify(params: dict) -> bool:
+    recv = params.get("hash", "").lower()
+    return recv == xunhu_sign(params).lower()
 
 
 # ============ 任务池 / VIP 套餐 ============
@@ -407,48 +376,52 @@ def api_vip_create_order(req: VIPCreateOrderReq):
 
     order_no = f"VIP{req.user[:8]}{int(time.time()*1000)}"
     params = {
-        "pid": EZFP_PID, "type": req.pay_type,
-        "out_trade_no": order_no, "name": f"VIP-{plan['name']}",
-        "money": f"{plan['price']:.2f}",
-        "notify_url": NOTIFY_URL, "return_url": RETURN_URL,
-        "sitename": "八宝粥行动", "clientip": "0.0.0.0", "device": "pc",
+        "version": "1.1",
+        "appid": XUNHU_APPID,
+        "trade_order_id": order_no,
+        "total_fee": f"{plan['price']:.2f}",
+        "title": f"VIP-{plan['name']}",
+        "time": str(int(time.time())),
+        "notify_url": NOTIFY_URL,
+        "return_url": RETURN_URL,
+        "nonce_str": uuid.uuid4().hex[:16],
+        "type": "WAP",
     }
-    params["sign"] = ezfp_sign(params)
-    params["sign_type"] = "RSA"
+    params["hash"] = xunhu_sign(params)
 
     print(f"[VIP-下单] 订单号={order_no}")
-    print(f"[VIP-下单] 签名={params['sign'][:40] if params['sign'] else '空'}...")
+    print(f"[VIP-下单] 请求虎皮椒: {XUNHU_API}")
 
     try:
-        r = requests.post(EZFP_MAPI, data=params, timeout=15,
+        r = requests.post(XUNHU_API, data=params, timeout=15,
                           proxies={"http": None, "https": None})
         print(f"[VIP-下单] HTTP {r.status_code}")
         print(f"[VIP-下单] 原始响应: {r.text[:500]}")
-        res = r.json() if r.status_code == 200 else {"code": 0, "msg": f"HTTP {r.status_code}"}
+        res = r.json() if r.status_code == 200 else {}
     except Exception as e:
         print(f"[VIP-下单] 异常: {e}")
         return {"success": False, "message": f"网络错误: {e}"}
 
-    if res.get("code") != 1:
-        return {"success": False, "message": res.get("msg","下单失败")}
+    if res.get("errcode") != 0:
+        msg = res.get("errmsg", "下单失败")
+        print(f"[VIP-下单] 虎皮椒拒绝: {msg}")
+        return {"success": False, "message": msg}
 
-    trade_no = res.get("trade_no", "")
-    if trade_no:
-        pay_url = EZFP_CASHIER_URL.format(trade_no=trade_no)
-    else:
-        pay_url = res.get("payurl", "")
+    pay_url = res.get("url", "")
+    qr_code = res.get("url_qrcode", "")
+    trade_no = res.get("oderid", "")
 
-    print(f"[VIP-下单] trade_no={trade_no}")
-    print(f"[VIP-下单] 支付页={pay_url}")
+    print(f"[VIP-下单] 支付链接={pay_url[:80]}")
+    print(f"[VIP-下单] 二维码={qr_code[:80]}")
 
     db_vip_order_create({
         "order_no": order_no, "username": req.user, "plan": req.plan,
         "days": plan["days"], "price": f"{plan['price']:.2f}",
         "status": "pending", "create_time": int(time.time()),
-        "qrcode": res.get("qrcode",""), "payurl": pay_url,
+        "qrcode": qr_code, "payurl": pay_url,
     })
     return {"success": True, "order_id": order_no,
-            "qrcode": res.get("qrcode",""), "payurl": pay_url,
+            "qrcode": qr_code, "payurl": pay_url,
             "price": plan["price"], "plan_name": plan["name"]}
 
 
@@ -460,23 +433,32 @@ def api_vip_query(req: VIPQueryReq):
     return {"success": True, "status": order["status"], "vip_expire": v["vip_expire"]}
 
 
-@app.api_route("/ezfp/notify", methods=["GET","POST"])
-async def ezfp_notify(request: Request):
+# ============ 虎皮椒回调 ============
+@app.api_route("/xunhu/notify", methods=["GET","POST"])
+async def xunhu_notify(request: Request):
     params = dict(request.query_params) if request.method == "GET" else dict(await request.form())
-    print(f"[回调] {params}")
-    if not ezfp_verify(params):
+    print(f"[虎皮椒-回调] {params}")
+
+    if not xunhu_verify(params):
+        print("[虎皮椒-回调] 签名失败")
         return Response("fail", media_type="text/plain")
-    if params.get("trade_status") != "TRADE_SUCCESS":
+
+    if params.get("status") != "OD":
+        print(f"[虎皮椒-回调] 非成功状态: {params.get('status')}")
         return Response("success", media_type="text/plain")
 
-    order_no = params.get("out_trade_no","")
-    trade_no = params.get("trade_no","")
-    money = params.get("money","")
+    order_no = params.get("trade_order_id", "")
+    trade_no = params.get("transaction_id", "")
+    total_fee = params.get("total_fee", "")
 
     order = db_vip_order_get(order_no)
-    if not order: return Response("success", media_type="text/plain")
-    if order["status"] == "paid": return Response("success", media_type="text/plain")
-    if str(order["price"]) != str(money):
+    if not order:
+        print(f"[虎皮椒-回调] 订单不存在: {order_no}")
+        return Response("success", media_type="text/plain")
+    if order["status"] == "paid":
+        return Response("success", media_type="text/plain")
+    if str(order["price"]) != str(total_fee):
+        print(f"[虎皮椒-回调] 金额不符: {order['price']} vs {total_fee}")
         return Response("fail", media_type="text/plain")
 
     db_vip_order_mark_paid(order_no, trade_no)
@@ -487,12 +469,12 @@ async def ezfp_notify(request: Request):
         cur_v = db_get_vip(u); now = int(time.time())
         base = cur_v["vip_expire"] if is_vip_active(cur_v) else now
         db_set_vip(u, {"month":1,"quarter":2,"year":3}.get(pk,1), base + days*86400)
-    print(f"[回调] ✅ {order_no} 支付成功")
+    print(f"[虎皮椒-回调] ✅ {order_no} 支付成功")
     return Response("success", media_type="text/plain")
 
 
-@app.api_route("/ezfp/return", methods=["GET","POST"])
-def ezfp_return():
+@app.api_route("/xunhu/return", methods=["GET","POST"])
+def xunhu_return():
     return {"status": "ok", "message": "支付完成，请返回游戏"}
 
 
