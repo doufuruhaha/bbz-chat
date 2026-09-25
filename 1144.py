@@ -199,10 +199,10 @@ DEFAULT_TASK_DEFS = {
 }
 
 VIP_PLANS = {
-    "month":{"name":"月卡","days":30,"price":6},
-    "quarter":{"name":"季卡","days":90,"price":15},
-    "year":{"name":"年卡","days":365,"price":50},
-    "forever":{"name":"永久","days":0,"price":128},
+    "month":{"name":"月卡","days":30,"price":0.1},
+    "quarter":{"name":"季卡","days":90,"price":0.1},
+    "year":{"name":"年卡","days":365,"price":0.1},
+    "forever":{"name":"永久","days":0,"price":0.1},
 }
 
 def seed_default_tasks():
